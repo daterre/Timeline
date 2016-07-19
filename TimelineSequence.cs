@@ -9,75 +9,31 @@ public sealed class TimelineSequence : TimelineSpan
     public Action<TimelineSequence> UpdateAction;
    
 	public string Name { get; internal set; }
-	public float Duration { get; internal set; }
-	public float Time { get; private set; }
+	public float Percent { get; private set; }
+	internal float DurationInternal { get; set; }
 
-	IEnumerator _enumerator = null;
-
-    internal TimelineSequence()
+	internal TimelineSequence()
     {
-    	Time = 0f;
+		Percent = 0f;
     }
 
-	public override bool IsEnded {
-		get { return this.Time >= 1f; }
+	public override float Duration
+	{
+		get { return DurationInternal; }
 	}
-    
+
     public T Var<T>(string name)
     {
         return this.Timeline.Var<T>(name);
     }
 
-	internal override void Play()
+	internal override void Update(float timecode)
 	{
-		this.Time = 0f;
+		this.Percent = DurationInternal <= 0f ?
+				1f :
+				Mathf.Clamp01((timecode - this.EventTimecode) / Duration);
 
-		if (Duration <= 0f)
-		{
-			// Sync
-			if (UpdateAction != null)
-				UpdateAction(this);
-			this.Time = 1f;
-		}
-		else
-		{
-			// Async
-			_enumerator = PlayAsync();
-		}
+		if (UpdateAction != null)
+			UpdateAction(this);
 	}
-
-	internal bool Advance()
-	{
-		if (_enumerator == null)
-			throw new InvalidOperationException("Can't advance the sequence - it hasn't been started.");
-
-		return _enumerator.MoveNext();
-	}
-
-	internal IEnumerator PlayAsync()
-    {
-		bool done = false;
-
-    	while(true)
-    	{
-			this.Time = Mathf.Clamp01((this.Timeline.PlayTime - this.TimeCode)/Duration);
-			
-			//if (this.Timeline.Script.name == "peggBlock (1)")
-			//	Debug.LogFormat("{0} - {1:P}", this.Timeline.Script.name, this.Time);
-
-			if (Time >= 1f)
-			{
-				done = true;
-				Time = 1f;
-			}
-
-    		if (UpdateAction != null)
-    			UpdateAction(this);
-
-			if (done)
-                break;
-
-			yield return null;
-    	}
-    }
 }

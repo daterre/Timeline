@@ -6,9 +6,9 @@ using System.Collections.Generic;
 
 public abstract class TimelineEvent
 {
-	public int EventIndex { get; internal set; }
 	public Timeline Timeline { get; internal set; }
-	public float TimeCode { get; internal set; }
+	public int EventIndex { get; internal set; }
+	public float EventTimecode { get; internal set; }
 
 	internal protected TimelineEvent()
 	{
@@ -17,15 +17,14 @@ public abstract class TimelineEvent
 
 	public override string ToString()
 	{
-		return string.Format("[{0}] #{1}: {2} @ {3} @ {4}",
+		return string.Format("[{0}] #{1}: {2} @ {3}",
 			this.Timeline.Script.name,
 			this.EventIndex,
 			this is TimelineWaitMarker ? "Wait" :
 			this is TimelineAction ? "Do" :
 			this is TimelineLoopMarker ? ((TimelineLoopMarker)this).MarkerType == TimelineLoopMarkerType.Begin ? "LoopBegin" : "LoopEnd" :
 			"Sequence",
-			this.TimeCode,
-			this.Timeline.PlayTime);
+			this.EventTimecode);
 	}
 }
 
@@ -58,6 +57,7 @@ public sealed class TimelineAction : TimelineEvent
 
 public abstract class TimelineSpan: TimelineEvent
 {
-	public abstract bool IsEnded { get; }
-	internal abstract void Play();
+	public abstract float Duration { get; }
+	internal abstract void Update(float timecode);
+
 }

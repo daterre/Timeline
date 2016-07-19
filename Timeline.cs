@@ -4,56 +4,104 @@ using System.Linq;
 using System.Collections;
 using System.Collections.Generic;
 
-public class Timeline
+public class Timeline: TimelineSpan
 {
-	public TimelineMode Mode = TimelineMode.Update;
+	public readonly TimelineFrameType FrameType = TimelineFrameType.Update;
 
-    public MonoBehaviour Script { get; private set;}
+	public TimelineState State { get; private set; }
+	public MonoBehaviour Script { get; private set; }
 	public Coroutine Coroutine { get; private set; }
-	public bool IsEnded { get; private set; }
-	public float PlayTime { get; private set; }
 	public int LoopsCompleted { get; private set; }
-	public float Duration { get { return _lastWaitMarker; } }
 
-    List<TimelineEvent> _events;
-    Dictionary<string, object> _vars = null;
+	List<TimelineEvent> _events;
+	Dictionary<string, object> _vars = null;
 	float _lastWaitMarker = 0f;
 	float _longestSequenceDuration = 0f;
-    	
-    public Timeline(MonoBehaviour script, TimelineMode mode = TimelineMode.Update)
-    {
-    	this.Script = script;
-		this.IsEnded = false;
-		this.PlayTime = 0f;
-		this.LoopsCompleted = 0;
-		this.Mode = mode;
+	float _currentTimecode = 0f;
 
-    	_events = new List<TimelineEvent>();
-    }
+	public Timeline(MonoBehaviour script, TimelineFrameType mode = TimelineFrameType.Update)
+	{
+		this.State = TimelineState.Editable;
+		this.Script = script;
+		this.LoopsCompleted = 0;
+		this.FrameType = mode;
+
+		_events = new List<TimelineEvent>();
+	}
+
+	void AssertWritable()
+	{
+		if (this.State != TimelineState.Editable)
+			throw new InvalidOperationException("The timeline is readonly once it has been started.");
+	}
+
+	void AssertRoot()
+	{
+		if (this.Timeline != null)
+			throw new InvalidOperationException("A nested timeline can't be controlled directly - use Play, Stop and JumpTo on the root timeline only.");
+	}
+
+	public float CurrentTimecode
+	{
+		get
+		{
+			return this.Timeline == null ?
+				_currentTimecode :
+				this.Timeline.CurrentTimecode - this.EventTimecode;
+		}
+	}
+
+	public override float Duration
+	{
+		get
+		{
+			return _lastWaitMarker;
+		}
+	}	
+
+	public bool IsEnded
+	{
+		get { return CurrentTimecode >= Duration; }
+	}
+
+	public bool IsPlaying
+	{
+		get { return this.Coroutine != null; }
+	}
+
+	public float LastFrameDuration
+	{
+		get
+		{
+			return this.FrameType == TimelineFrameType.FixedUpdate ? Time.fixedDeltaTime :
+				this.FrameType == TimelineFrameType.Realtime ? Time.unscaledDeltaTime :
+				Time.deltaTime;
+		}
+	}
 
 	#region Vars
 	// ..............................................................
 	public Timeline Var<T>(string name, T val)
-    {
-        if (_vars == null)
-            _vars = new Dictionary<string, object>();
-        _vars[name] = val;
-        return this;
-    }
+	{
+		if (_vars == null)
+			_vars = new Dictionary<string, object>();
+		_vars[name] = val;
+		return this;
+	}
 
-    public T Var<T>(string name)
-    {
-        object val;
-        if (_vars == null || !_vars.TryGetValue(name, out val))
-            throw new ArgumentException(name + " is not defined in the timeline vars.");
+	public T Var<T>(string name)
+	{
+		object val;
+		if (_vars == null || !_vars.TryGetValue(name, out val))
+			throw new ArgumentException(name + " is not defined in the timeline vars.");
 
-        return (T) val;
-    }
+		return (T)val;
+	}
 
-    public IEnumerable<string> Vars
-    {
-        get { if (_vars == null) return null; else return _vars.Keys.AsEnumerable(); }
-    }
+	public IEnumerable<string> Vars
+	{
+		get { if (_vars == null) return null; else return _vars.Keys.AsEnumerable(); }
+	}
 	// ..............................................................
 	#endregion
 
@@ -62,21 +110,24 @@ public class Timeline
 
 	// TODO: allow naming sequences
 	private Timeline Tween(string sequenceName, float duration, Action<TimelineSequence> action)
-    {
-    	_events.Add(new TimelineSequence(){
+	{
+		AssertWritable();
+
+		_events.Add(new TimelineSequence()
+		{
 			Timeline = this,
 			EventIndex = _events.Count,
-			TimeCode = _lastWaitMarker,
+			EventTimecode = _lastWaitMarker,
 			Name = sequenceName,
-    		Duration = duration,
-    		UpdateAction = action
-    	});
+			DurationInternal = duration,
+			UpdateAction = action
+		});
 
 		if (duration > _longestSequenceDuration)
 			_longestSequenceDuration = duration;
-    		
-    	return this;
-    }
+
+		return this;
+	}
 
 	public Timeline Tween(float duration, Action<TimelineSequence> action)
 	{
@@ -88,7 +139,7 @@ public class Timeline
 		int? prevFrame = -1;
 		return Tween(duration, s =>
 		{
-			int currentFrame = Mathf.FloorToInt(s.Time * frameCount);
+			int currentFrame = Mathf.FloorToInt(s.Percent * frameCount);
 			if (currentFrame < frameCount && currentFrame != prevFrame.Value)
 			{
 				prevFrame = currentFrame;
@@ -108,8 +159,11 @@ public class Timeline
 
 	public Timeline Nest(Action<Timeline> init)
 	{
-		Timeline nested = this.Script.Timeline(this.Mode);
-		
+		AssertWritable();
+
+		Timeline nested = this.Script.Timeline(this.FrameType);
+		nested.Timeline = this;
+
 		init(nested);
 		Nest(nested);
 
@@ -118,44 +172,58 @@ public class Timeline
 
 	public Timeline Nest(Timeline nested)
 	{
+		AssertWritable();
+
 		if (nested == null)
 			throw new System.ArgumentNullException("nested");
 
-		//if (nested.Script.gameObject != this.Script.gameObject)
-		//	throw new System.ArgumentException("Nested timeline must be created from the same game object as the parent timeline.");
+		if (nested.State != TimelineState.Editable)
+			throw new InvalidOperationException("Can't nest a timeline that has already been started.");
 
-		//if (nested.Mode != this.Mode)
-		//	throw new System.ArgumentException("Nested timeline mode must be the same as the parent timeline mode.");
+		if (nested.Timeline != null && nested.Timeline != this)
+			throw new InvalidOperationException("The timeline is already nested in a different parent timeline.");
 
-		_events.Add(new TimelineNested()
-		{
-			Timeline = this,
-			InnerTimeline = nested,
-			EventIndex = _events.Count,
-			TimeCode = _lastWaitMarker
-		});
+		if (nested._events.Any(ev => ev is TimelineLoopMarker))
+			throw new InvalidOperationException("A nested timeline can't contain any loops. Use Repeat() instead.");
+
+		if (nested.Script.gameObject != this.Script.gameObject)
+			throw new System.ArgumentException("Nested timeline must be created from the same game object as the parent timeline.");
+
+		if (nested.FrameType != this.FrameType)
+			throw new System.ArgumentException("Nested timeline frame type must be the same as the parent frame type.");
+
+		nested.Timeline = this;
+		nested.EventIndex = _events.Count;
+		nested.EventTimecode = _lastWaitMarker;
+		nested.Prepare();
 
 		if (nested.Duration > _longestSequenceDuration)
 			_longestSequenceDuration = nested.Duration;
 
+		_events.Add(nested);
+
 		return this;
 	}
-    	
-    public Timeline Do(Action<TimelineAction> action)
-    {
+
+	public Timeline Do(Action<TimelineAction> action)
+	{
+		AssertWritable();
+
 		_events.Add(new TimelineAction()
 		{
 			Timeline = this,
 			EventIndex = _events.Count,
-			TimeCode = _lastWaitMarker,
+			EventTimecode = _lastWaitMarker,
 			Action = action
 		});
 
-    	return this;
-    }
-    	
-    public Timeline Wait()
-    {
+		return this;
+	}
+
+	public Timeline Wait()
+	{
+		AssertWritable();
+
 		// Don't add redundant / unnecessary waits
 		if (_events.Count == 0 || _events[_events.Count - 1] is TimelineWaitMarker)
 			return this;
@@ -163,42 +231,49 @@ public class Timeline
 		_lastWaitMarker += _longestSequenceDuration;
 		_longestSequenceDuration = 0f;
 
-		_events.Add(new TimelineWaitMarker() {
+		_events.Add(new TimelineWaitMarker()
+		{
 			Timeline = this,
 			EventIndex = _events.Count,
-			TimeCode = _lastWaitMarker
+			EventTimecode = _lastWaitMarker
 		});
-    		
-    	return this;
-    }
-    	
-    public Timeline Hold(float duration)
-    {
+
+		return this;
+	}
+
+	public Timeline Hold(float duration)
+	{
+		AssertWritable();
+
 		Wait();
-		
-    	_events.Add(new TimelineSequence(){
+
+		_events.Add(new TimelineSequence()
+		{
 			Timeline = this,
-    		Duration = duration,
+			DurationInternal = duration,
 			EventIndex = _events.Count,
-			TimeCode = _lastWaitMarker
-    	});
-    		
+			EventTimecode = _lastWaitMarker
+		});
+
 		_lastWaitMarker += duration;
 		_longestSequenceDuration = 0f;
 
-        Wait();
+		Wait();
 
-    	return this;
-    }
+		return this;
+	}
 
 	public Timeline LoopBegin(int loopCount = -1)
 	{
+		AssertWritable();
+
 		Wait();
 
-		_events.Add(new TimelineLoopMarker() {
+		_events.Add(new TimelineLoopMarker()
+		{
 			Timeline = this,
 			EventIndex = _events.Count,
-			TimeCode = _lastWaitMarker,
+			EventTimecode = _lastWaitMarker,
 			MarkerType = TimelineLoopMarkerType.Begin,
 			LoopCount = loopCount
 		});
@@ -208,13 +283,15 @@ public class Timeline
 
 	public Timeline LoopEnd()
 	{
+		AssertWritable();
+
 		Wait();
 
 		_events.Add(new TimelineLoopMarker()
 		{
 			Timeline = this,
 			EventIndex = _events.Count,
-			TimeCode = _lastWaitMarker,
+			EventTimecode = _lastWaitMarker,
 			MarkerType = TimelineLoopMarkerType.End
 		});
 
@@ -226,10 +303,10 @@ public class Timeline
 	#region Control methods
 	// ..............................................................
 
-	public Timeline Play()
-    {
-		if (this.Coroutine != null)
-			throw new System.InvalidOperationException("Timeline is already playing.");
+	void Prepare()
+	{
+		if (this.State == TimelineState.Started)
+			throw new InvalidOperationException("Timeline has already been prepared and started.");
 
 		// Close any open loops
 		bool openLoop = false;
@@ -237,7 +314,7 @@ public class Timeline
 		{
 			if (_events[i] is TimelineLoopMarker)
 			{
-				var loopMarker = (TimelineLoopMarker) _events[i];
+				var loopMarker = (TimelineLoopMarker)_events[i];
 				openLoop = loopMarker.MarkerType == TimelineLoopMarkerType.Begin;
 			}
 		}
@@ -253,30 +330,202 @@ public class Timeline
 			this.Wait();
 		}
 
-		this.Coroutine = this.Script.StartCoroutine(PlayInternal());
-    	return this;
-    }
+		this.State = TimelineState.Started;
+	}
 
-    public Timeline Stop()
-    {
-		for (int i = 0; i < _events.Count; i++) { 
-			if (_events[i] is TimelineNested) {
-				var nested = (TimelineNested)_events[i];
-				nested.InnerTimeline.Stop();
+	internal override void Update(float timecode)
+	{
+		ScrubTo(timecode-this.EventTimecode);
+	}
+
+	public Timeline ScrubTo(float timecode)
+	{
+		if (this.State != TimelineState.Started)
+			Prepare();
+
+		if (this.IsPlaying)
+			throw new InvalidOperationException("Can't scrub timeline while it is playing. Call Pause() first.");
+
+		using (var currentEvents = GetEventsAtTime(timecode))
+		{
+			while (currentEvents.MoveNext())
+			{
+				TimelineEvent ev = currentEvents.Current;
+
+				if (ev is TimelineAction)
+				{
+					// Invoke the action immediately
+					var action = (TimelineAction)ev;
+					action.Invoke();
+				}
+				else if (ev is TimelineSpan)
+				{
+					var span = (TimelineSpan)ev;
+					span.Update(timecode);
+				}
 			}
 		}
 
+		_currentTimecode = timecode;
+
+		return this;
+	}
+
+	public Timeline Play()
+	{
+		AssertRoot();
+
+		if (this.IsPlaying)
+			throw new System.InvalidOperationException("Timeline is already playing.");
+
+		if (this.State != TimelineState.Started)
+			Prepare();
+
+		// Create the enumerator that will run the timeline
+		this.Coroutine = this.Script.StartCoroutine(PlayInternal());
+		return this;
+	}
+
+	public Timeline Pause()
+	{
 		if (this.Script != null && this.Coroutine != null)
 			this.Script.StopCoroutine(this.Coroutine);
 
-		this.IsEnded = true;
-
 		return this;
-    }
+	}
+
+	bool Looping(int i, int max, bool reverse)
+	{
+		return reverse ? i >= 0 : i < max;
+	}
+
+	IEnumerator<TimelineEvent> GetEventsAtTime(float timecode, TimelineTraversal behavior = TimelineTraversal.Scrub)
+	{
+		bool reverse = this.CurrentTimecode > timecode;
+		int start = reverse ? _events.Count - 1 : 0;
+		float lastFrameDeltaTime = this.LastFrameDuration;
+
+		for (int i = start; Looping(i, _events.Count, reverse); i = reverse ? i-1 : i+1)
+		{
+			TimelineEvent ev = _events[i];
+			if (ev is TimelineSpan)
+			{
+				// Add the frame delta to the timespan check so that span can always perform a 100% update
+				var span = (TimelineSpan)ev;
+				if (span.EventTimecode <= timecode && span.EventTimecode + span.Duration > timecode - lastFrameDeltaTime)
+					yield return span;
+			}
+			else
+			{
+				if (behavior == TimelineTraversal.Scrub)
+				{
+					if (ev.EventTimecode == timecode)
+						yield return ev;
+				}
+				else if (behavior == TimelineTraversal.Skip)
+				{
+					if (
+						(!reverse && ev.EventTimecode > this.CurrentTimecode && ev.EventTimecode <= timecode) ||
+						(reverse && ev.EventTimecode < this.CurrentTimecode && ev.EventTimecode >= timecode)
+						)
+						yield return ev;
+				}
+			}
+		}
+	}
 
 	System.Collections.IEnumerator PlayInternal()
 	{
-		this.PlayTime = 0f;
+		bool ended = false;
+		float timecode = this.CurrentTimecode;
+		TimelineLoopMarker loopStartMarker = null;
+
+		while (timecode < Duration || !ended)
+		{
+			// If it is ended, play one more frame at the final position
+			if (timecode >= Duration)
+			{
+				timecode = Duration;
+				ended = true;
+			}
+
+			var currentEvents = GetEventsAtTime(timecode);
+			try
+			{
+				while (currentEvents.MoveNext())
+				{
+					TimelineEvent ev = currentEvents.Current;
+
+					if (ev is TimelineAction)
+					{
+						// Invoke the action immediately
+						var action = (TimelineAction)ev;
+						action.Invoke();
+					}
+					else if (ev is TimelineSpan)
+					{
+						var span = (TimelineSpan)ev;
+						span.Update(timecode);
+					}
+					else if (ev is TimelineLoopMarker)
+					{
+						var loopMarker = (TimelineLoopMarker)ev;
+						if (loopMarker.MarkerType == TimelineLoopMarkerType.Begin && loopMarker != loopStartMarker)
+						{
+							// Start a new loop from here
+							loopStartMarker = loopMarker;
+							this.LoopsCompleted = 0;
+						}
+						else if (loopMarker.MarkerType == TimelineLoopMarkerType.End)
+						{
+							// Stop the current loop
+							if (loopStartMarker != null)
+							{
+								this.LoopsCompleted++;
+								if (loopStartMarker.LoopCount > 0 && this.LoopsCompleted == loopStartMarker.LoopCount)
+								{
+									// End the current loop
+									loopStartMarker = null;
+								}
+								else
+								{
+									// Jump to the loop start time, and re-retrieve the events at the new time
+									_currentTimecode = loopStartMarker.EventTimecode;
+									timecode -= loopMarker.EventTimecode - loopStartMarker.EventTimecode;
+									ended = false;
+
+									currentEvents.Dispose();
+									currentEvents = GetEventsAtTime(timecode);
+								}
+							}
+							else
+								Debug.LogError("LoopEnd found with no matching LoopBegin");
+						}
+					}
+				}
+			}
+			finally
+			{
+				currentEvents.Dispose();
+			}
+
+			_currentTimecode = timecode;
+
+			// Wait for a frame
+			yield return this.FrameType == TimelineFrameType.FixedUpdate ?
+				new WaitForFixedUpdate() :
+				null;
+
+			// Advance the time
+			timecode += LastFrameDuration;
+		}
+
+	}
+
+	/*
+	System.Collections.IEnumerator PlayInternalOld()
+	{
+		this.CurrentTimeCode = 0f;
 		this.LoopsCompleted = 0;
 
 		TimelineLoopMarker loopStartMarker = null;
@@ -314,28 +563,26 @@ public class Timeline
 							alldone &= prevEvent.IsEnded;
 					}
 
-					//if (this.Script.name == "peggBlock (1)")
-					//	Debug.LogFormat("Loop {0} - {1:0.00}", this.LoopsCompleted, this.PlayTime);
-
 					if (alldone)
 					{
 						break;
 					}
 					else
 					{
-						yield return this.Mode == TimelineMode.FixedUpdate ?
+						yield return this.FrameType == TimelineFrameType.FixedUpdate ?
 							new WaitForFixedUpdate() :
 							null;
 
+						// Maybe this component or gameObject has been destroyed - in that case, stop immediately
 						if (this.Script == null)
 						{
 							this.Stop();
 							yield break;
 						}
 
-						this.PlayTime +=
-							this.Mode == TimelineMode.FixedUpdate ? Time.fixedDeltaTime :
-							this.Mode == TimelineMode.Realtime ? Time.unscaledDeltaTime :
+						this.CurrentTimeCode +=
+							this.FrameType == TimelineFrameType.FixedUpdate ? Time.fixedDeltaTime :
+							this.FrameType == TimelineFrameType.Realtime ? Time.unscaledDeltaTime :
 							Time.deltaTime;
 					}
 				}
@@ -367,7 +614,7 @@ public class Timeline
 						{
 							// Restart the loop
 							eventIndex = loopStartMarker.EventIndex; // +1 in the for loop will actually advance this to the next event after the loop begin
-							this.PlayTime -= loopMarker.TimeCode - loopStartMarker.TimeCode;
+							this.CurrentTimeCode -= loopMarker.TimeCode - loopStartMarker.TimeCode;
 						}
 					}
 					else
@@ -379,13 +626,11 @@ public class Timeline
 			// TimelineSpan
 			else if (timelineEvent is TimelineSpan)
 			{
-				var sequence = (TimelineSpan)timelineEvent;
-				sequence.Play();
+				var span = (TimelineSpan)timelineEvent;
+				span.Play();
 			}
 		}
-
-		this.IsEnded = true;
-	}
+	}*/
 
 	// ..............................................................
 	#endregion
@@ -393,15 +638,27 @@ public class Timeline
 
 public static class TimelineExtenstions
 {
-    public static Timeline Timeline(this MonoBehaviour script, TimelineMode mode = TimelineMode.Update)
-    {
+	public static Timeline Timeline(this MonoBehaviour script, TimelineFrameType mode = TimelineFrameType.Update)
+	{
 		return new Timeline(script, mode);
-    }
+	}
 }
 
-public enum TimelineMode
+public enum TimelineFrameType
 {
-    Update,
+	Update,
 	FixedUpdate,
 	Realtime
+}
+
+public enum TimelineState
+{
+	Editable,
+	Started
+}
+
+public enum TimelineTraversal
+{
+	Scrub,
+	Skip
 }
