@@ -9,12 +9,12 @@ public sealed class TimelineSequence : TimelineSpan
     public Action<TimelineSequence> UpdateAction;
    
 	public string Name { get; internal set; }
-	public float Percent { get; private set; }
+	public float NormalizedTime { get; private set; }
 	internal float DurationInternal { get; set; }
 
 	internal TimelineSequence()
     {
-		Percent = 0f;
+		NormalizedTime = 0f;
     }
 
 	public override float Duration
@@ -29,7 +29,7 @@ public sealed class TimelineSequence : TimelineSpan
 
 	internal override void Update(float timecode)
 	{
-		this.Percent = DurationInternal <= 0f ?
+		this.NormalizedTime = DurationInternal <= 0f ?
 				1f :
 				Mathf.Clamp01((timecode - this.EventTimecode) / Duration);
 

@@ -139,7 +139,7 @@ public class Timeline: TimelineSpan
 		int? prevFrame = -1;
 		return Tween(duration, s =>
 		{
-			int currentFrame = Mathf.FloorToInt(s.Percent * frameCount);
+			int currentFrame = Mathf.FloorToInt(s.NormalizedTime * frameCount);
 			if (currentFrame < frameCount && currentFrame != prevFrame.Value)
 			{
 				prevFrame = currentFrame;
